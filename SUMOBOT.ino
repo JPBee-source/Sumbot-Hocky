@@ -1,0 +1,976 @@
+// ===== Include Libraries =====
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <ArduinoJson.h>
+#include <DNSServer.h>
+
+// ===== Wi-Fi Credentials =====
+const char* ssid = "Jully";
+const char* password = "12345678";
+
+// ===== DNS Configuration =====
+const byte DNS_PORT = 53;
+IPAddress apIP(192, 168, 4, 1); // Static IP for Access Point
+DNSServer dnsServer;
+
+// ===== Web Server Setup =====
+WebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81); // WebSocket server for real-time communication
+
+// ===== Motor Control Pins =====
+const int IN1 = 5;
+const int IN2 = 17;
+const int IN3 = 16;
+const int IN4 = 4;
+const int ENA = 18;
+const int ENB = 19;
+
+int motorSpeed = 200; // Default motor speed
+bool powerOn = true; // Robot power state
+bool autoMode = false;
+
+// ===== Sensor Pins =====
+const int batteryPin = 36;    // ADC pin for battery monitoring
+const int IR_FRONT_PIN = 34;  // Front IR sensor
+const int IR_BACK_PIN = 35;   // Back IR sensor
+const int TRIG_PIN = 26;      // Ultrasonic trigger pin
+const int ECHO_PIN = 25;      // Ultrasonic echo pin
+
+// ===== Setup Functions =====
+void setupSensors() {
+  pinMode(IR_FRONT_PIN, INPUT);
+  pinMode(IR_BACK_PIN, INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+}
+
+void setupMotors() {
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+}
+
+// ===== Movement Functions =====
+void moveForward() {
+  if (!powerOn) return;
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+}
+
+void moveBackward() {
+  if (!powerOn) return;
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+}
+
+void turnLeft() {
+  if (!powerOn) return;
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+}
+
+void turnRight() {
+  if (!powerOn) return;
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  analogWrite(ENA, motorSpeed);
+  analogWrite(ENB, motorSpeed);
+}
+
+void stopMotors() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+}
+
+// ===== WebSocket Event Handler =====
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Disconnected!\n", num);
+      break;
+    case WStype_CONNECTED:
+      Serial.printf("[%u] Connected!\n", num);
+      break;
+    case WStype_TEXT: {
+      String command = String((char*)payload);
+      if(command == "ON") powerOn = true;
+      else if(command == "OFF") {
+        powerOn = false;
+        stopMotors();
+      }
+      else if(command == "forward") moveForward();
+      else if(command == "backward") moveBackward();
+      else if(command == "left") turnLeft();
+      else if(command == "right") turnRight();
+      else if(command == "stop") stopMotors();
+      break;
+    }
+  }
+}
+
+// ===== Autonomous Behavior =====
+void runAutoMode() {
+  int irFront = digitalRead(IR_FRONT_PIN);
+  int irBack = digitalRead(IR_BACK_PIN);
+  long distance = readUltrasonic();
+
+  if (irFront == 0) { // Edge ahead
+    stopMotors(); delay(200);
+    moveBackward(); delay(300);
+    turnRight(); delay(300);
+    stopMotors();
+    return;
+  }
+
+  if (irBack == 0) { // Edge behind
+    stopMotors(); delay(200);
+    moveForward(); delay(300);
+    turnLeft(); delay(300);
+    stopMotors();
+    return;
+  }
+
+  if (distance < 30 && distance > 0) {
+    moveForward(); // Chase enemy
+  } else {
+    turnRight(); // Scan
+  }
+}
+
+// ===== Sensor Utilities =====
+float readBatteryVoltage() {
+  int raw = analogRead(batteryPin);
+  float voltage = (raw / 4095.0) * 3.3;
+  return voltage * (3.3 / 1.0); // Adjust based on voltage divider
+}
+
+long readUltrasonic() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duration == 0) return -1;
+  long distance = duration * 0.034 / 2;
+  return (distance > 400) ? -1 : distance;
+}
+
+
+void handleRoot() {
+  const char* html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SUBOMOTO ROBOT</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap');
+:root {
+  --primary-color: #0a84ff;
+  --danger-color: #ef4444;
+  --warning-color: #f59e0b;
+  --info-color: #38bdf8;
+}
+
+body {
+  margin: 0;
+  font-family: 'Poppins', sans-serif;
+  color: #f0f0f0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(-45deg, #1f1f1f, #2c2c2c, #121212, #202020);
+  background-size: 600% 600%;
+  animation: rainbow 18s ease infinite;
+  padding: 20px;
+}
+
+@keyframes rainbow {
+  0% {background-position: 0% 50%;}
+  50% {background-position: 100% 50%;}
+  100% {background-position: 0% 50%;}
+}
+
+.container {
+  max-width: 800px;
+  width: 100%;
+}
+
+h1 {
+  font-size: 3rem;
+  font-weight: 600;
+  margin: 10px 0 5px;
+  text-align: center;
+  text-shadow: 2px 2px 10px rgba(0,0,0,0.6);
+}
+
+.status-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+#status, #battery {
+  font-size: 1rem;
+  color: #fff;
+  padding: 8px 15px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.1);
+  transition: all 0.3s ease;
+}
+
+#status.connected {
+  background: rgba(250, 204, 21, 0.2);
+}
+
+#status.disconnected {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+#battery.low {
+  background: rgba(239, 68, 68, 0.3);
+}
+
+#battery.medium {
+  background: rgba(245, 158, 11, 0.3);
+}
+
+#battery.good {
+  background: rgba(74, 222, 128, 0.3);
+}
+
+.controls-container {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.control-panel {
+  background: rgba(30, 30, 30, 0.8);
+  border-radius: 20px;
+  padding: 20px;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.6);
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease;
+}
+
+.control-panel:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 12px 25px rgba(0,0,0,0.8);
+}
+
+.panel-header {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 15px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 10px;
+}
+
+.panel-title {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin: 0;
+  text-align: center;
+  width: 100%;
+}
+
+#sensors {
+  text-align: center;
+  font-size: 1.2rem;
+  color: #eee;
+  transition: all 0.3s ease;
+}
+
+#sensors p {
+  margin: 10px 0;
+  font-weight: 500;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#sensors span {
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+  min-width: 80px;
+  text-align: center;
+}
+
+.ir-black {
+  background: #111;
+  color: white;
+}
+
+.ir-white {
+  background: #333;
+  color: #f5f5f5;
+}
+
+.ultra-highlight {
+  color: var(--info-color);
+  background: rgba(56, 189, 248, 0.15);
+}
+
+.ultra-warning {
+  color: var(--warning-color);
+  background: rgba(245, 158, 11, 0.15);
+}
+
+.ultra-danger {
+  color: var(--danger-color);
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.switch-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 15px;
+  margin: 10px 0;
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 70px;
+  height: 38px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #444;
+  transition: 0.4s;
+  border-radius: 34px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 30px;
+  width: 30px;
+  left: 4px;
+  bottom: 4px;
+  background-color: #fff;
+  transition: 0.4s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: var(--primary-color);
+}
+input:checked + .slider:before {
+  transform: translateX(32px);
+}
+
+.controller {
+  display: grid;
+  grid-template-columns: repeat(3, 90px);
+  grid-template-rows: repeat(3, 90px);
+  gap: 15px;
+  justify-items: center;
+  align-items: center;
+  margin: 0 auto;
+  justify-content: center;
+}
+
+.btn {
+  width: 90px;
+  height: 90px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 2px solid #555;
+  cursor: pointer;
+  transition: 0.3s;
+  user-select: none;
+  color: #fff;
+}
+
+.btn:hover {
+  transform: scale(1.05);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.btn:active {
+  transform: scale(0.95);
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.btn.active {
+  background: #0a0a0a;
+  border-color: var(--primary-color);
+}
+
+.speed-control {
+  text-align: center;
+  margin-top: 15px;
+}
+
+.speed-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+input[type="range"] {
+  width: 100%;
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: white;
+  cursor: pointer;
+}
+
+.presets {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 15px;
+}
+
+.preset-btn {
+  padding: 8px 15px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid #888;
+  color: #eee;
+  cursor: pointer;
+  transition: 0.3s;
+  font-size: 0.9rem;
+}
+
+.preset-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+footer {
+  margin-top: 30px;
+  color: #aaa;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.keyboard-controls {
+  margin-top: 15px;
+  text-align: center;
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.keyboard-key {
+  display: inline-block;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  margin: 0 3px;
+}
+
+.log-container {
+  max-height: 150px;
+  overflow-y: auto;
+  margin-top: 15px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 10px;
+  font-size: 0.9rem;
+}
+
+.log-entry {
+  margin: 5px 0;
+  padding: 5px;
+  border-radius: 5px;
+}
+
+.log-info {
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.log-warning {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.log-error {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+@media (max-width: 600px) {
+  .controller {
+    grid-template-columns: repeat(3, 70px);
+    grid-template-rows: repeat(3, 70px);
+    gap: 10px;
+  }
+
+  .btn {
+    width: 70px;
+    height: 70px;
+    font-size: 1.5rem;
+  }
+
+  h1 {
+    font-size: 2rem;
+  }
+
+  .panel-title {
+    font-size: 1.2rem;
+  }
+}
+
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>SUBOMOTO CONTROLLER</h1>
+    
+    <div class="status-container">
+      <div id="status">Status: Connecting...</div>
+      <div id="battery">Battery : ** V</div>
+    </div>
+    
+    <div class="controls-container">
+      <div class="control-panel">
+        <div class="panel-header">
+          <h2 class="panel-title"><i class="fas fa-power-off"></i>SWITCH</h2>
+        </div>
+        
+        <div class="switch-container">
+          <span>Power:</span>
+          <label class="switch">
+            <input type="checkbox" id="powerSwitch" checked onchange="togglePower()">
+            <span class="slider"></span>
+          </label>
+        </div>
+        
+        <div class="switch-container">
+          <span>Mode: <strong id="modeLabel">Manual</strong></span>
+          <label class="switch">
+            <input type="checkbox" id="modeSwitch" onchange="toggleMode()">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+      
+      <div class="control-panel">
+        <div class="panel-header">
+          <h2 class="panel-title"><i class="fas fa-gamepad"></i> Controls</h2>
+        </div>
+        
+        <div class="controller">
+          <div></div>
+          <div class="btn" id="forwardBtn" ontouchstart="controlStart('forward')" ontouchend="controlStop()" onmousedown="controlStart('forward')" onmouseup="controlStop()" onmouseleave="controlStop()">▲</div>
+          <div></div>
+          <div class="btn" id="leftBtn" ontouchstart="controlStart('left')" ontouchend="controlStop()" onmousedown="controlStart('left')" onmouseup="controlStop()" onmouseleave="controlStop()">◄</div>
+          <div class="btn" id="stopBtn" onclick="controlStart('stop')">↯</div>
+          <div class="btn" id="rightBtn" ontouchstart="controlStart('right')" ontouchend="controlStop()" onmousedown="controlStart('right')" onmouseup="controlStop()" onmouseleave="controlStop()">►</div>
+          <div></div>
+          <div class="btn" id="backwardBtn" ontouchstart="controlStart('backward')" ontouchend="controlStop()" onmousedown="controlStart('backward')" onmouseup="controlStop()" onmouseleave="controlStop()">▼</div>
+          <div></div>
+        </div>
+        
+        <div class="keyboard-controls">
+          Use keyboard: <span class="keyboard-key">W</span> <span class="keyboard-key">A</span> <span class="keyboard-key">S</span> <span class="keyboard-key">D</span> to control, <span class="keyboard-key">Space</span> to stop
+        </div>
+      </div>
+      
+      <div class="control-panel">
+        <div class="panel-header">
+          <h2 class="panel-title"><i class="fas fa-tachometer-alt"></i> Speed Control</h2>
+        </div>
+        
+        <div class="speed-control">
+          <div class="speed-label">
+            <span>Speed:</span>
+            <span id="speedValue">200</span>
+          </div>
+          <input type="range" id="speed" min="100" max="255" value="200" 
+                 oninput="updateSpeed(this.value)"
+                 onchange="setSpeed(this.value)">
+          
+          <div class="presets">
+            <button class="preset-btn" onclick="setSpeedPreset(100)">Slow</button>
+            <button class="preset-btn" onclick="setSpeedPreset(175)">Medium</button>
+            <button class="preset-btn" onclick="setSpeedPreset(255)">Fast</button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="control-panel">
+        <div class="panel-header">
+          <h2 class="panel-title"><i class="fas fa-robot"></i> Sensor Readings</h2>
+        </div>
+        
+        <div id="sensors">
+          <p>
+            <span>IR Front:</span>
+            <span id="irFront" class="ir-white">--</span>
+          </p>
+          <p>
+            <span>IR Back:</span>
+            <span id="irBack" class="ir-white">--</span>
+          </p>
+          <p>
+            <span>Distance:</span>
+            <span id="ultra" class="ultra-highlight">--</span><span>cm</span>
+          </p>
+        </div>
+      </div>
+      
+      <div class="control-panel">
+        <div class="panel-header">
+          <h2 class="panel-title"><i class="fas fa-history"></i> Activity Log</h2>
+        </div>
+        
+        <div id="logContainer" class="log-container">
+          <div class="log-entry log-info">System initialized</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const server = new WebSocket('ws://' + window.location.hostname + ':81');
+    let isConnected = false;
+    let isPowerOn = true;
+    let isModeManual = true;
+    let isMoving = false;
+    let speed = 200;
+    let lastMoveTime = 0;
+    let moveInterval = null;
+    let activeControl = null;
+    let controlInterval = null;
+    
+    function addLog(message, type = 'info') {
+      const logContainer = document.getElementById('logContainer');
+      const logEntry = document.createElement('div');
+      logEntry.className = 'log-entry log-' + type;
+      logEntry.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
+      logContainer.appendChild(logEntry);
+      logContainer.scrollTop = logContainer.scrollHeight;
+      
+      while (logContainer.children.length > 50) {
+        logContainer.removeChild(logContainer.firstChild);
+      }
+    }
+    
+    function togglePower() {
+      const powerSwitch = document.getElementById('powerSwitch');
+      fetch('/togglePower')
+        .then(() => {
+          addLog('Power turned ' + (powerSwitch.checked ? 'ON' : 'OFF'));
+        })
+        .catch(error => {
+          addLog('Failed to toggle power: ' + error, 'error');
+        });
+    }
+    
+    function toggleMode() {
+      const modeSwitch = document.getElementById('modeSwitch');
+      const modeLabel = document.getElementById('modeLabel');
+      fetch('/toggleMode')
+        .then(() => {
+          const newMode = modeSwitch.checked ? "Auto" : "Manual";
+          modeLabel.innerText = newMode;
+          addLog('Mode changed to ' + newMode);
+        })
+        .catch(error => {
+          addLog('Failed to toggle mode: ' + error, 'error');
+        });
+    }
+    
+    function controlStart(direction) {
+      if (controlInterval) {
+        clearInterval(controlInterval);
+        controlInterval = null;
+      }
+      
+      document.querySelectorAll('.btn').forEach(btn => btn.classList.remove('active'));
+      
+      const btnId = direction + 'Btn';
+      const btn = document.getElementById(btnId);
+      if (btn) btn.classList.add('active');
+      
+      activeControl = direction;
+      
+      sendCommand(direction);
+      
+      if (direction !== 'stop') {
+        controlInterval = setInterval(() => {
+          sendCommand(direction);
+        }, 200);
+      }
+    }
+    
+    function controlStop() {
+      if (controlInterval) {
+        clearInterval(controlInterval);
+        controlInterval = null;
+      }
+      
+      document.querySelectorAll('.btn').forEach(btn => btn.classList.remove('active'));
+      
+      if (activeControl && activeControl !== 'stop') {
+        sendCommand('stop');
+        document.getElementById('stopBtn').classList.add('active');
+        setTimeout(() => {
+          document.getElementById('stopBtn').classList.remove('active');
+        }, 300);
+      }
+      
+      activeControl = null;
+    }
+    
+    function sendCommand(command) {
+      if (server.readyState === WebSocket.OPEN) {
+        server.send(command);
+        if (!controlInterval || command === 'stop') {
+          addLog('Command sent: ' + command);
+        }
+      } else {
+        addLog('WebSocket not connected, command failed: ' + command, 'error');
+        controlStop();
+      }
+    }
+    
+    function initWebSocket() {
+      server.onopen = function() {
+        isConnected = true;
+        updateStatus();
+      };
+      
+      server.onclose = function() {
+        isConnected = false;
+        updateStatus();
+      };
+      
+      server.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        if (data.type === 'sensors') {
+          updateSensors(data);
+        }
+      };
+    }
+    
+    function updateSpeed(value) {
+      document.getElementById('speedValue').innerText = value;
+    }
+    
+    function setSpeed(value) {
+      fetch('/speed?value=' + value)
+        .then(() => {
+          addLog('Speed set to ' + value);
+        })
+        .catch(error => {
+          addLog('Failed to set speed: ' + error, 'error');
+        });
+    }
+    
+    function setSpeedPreset(value) {
+      const speedSlider = document.getElementById('speed');
+      speedSlider.value = value;
+      updateSpeed(value);
+      setSpeed(value);
+    }
+    
+    function updateStatus() {
+      const statusElement = document.getElementById('status');
+      statusElement.textContent = 'Status: ' + (isConnected ? 'Connected' : 'Disconnected');
+      statusElement.className = isConnected ? 'connected' : 'disconnected';
+    }
+    
+    function updateBattery() {
+      fetch('/battery')
+        .then(response => response.text())
+        .then(voltage => {
+          const batteryElement = document.getElementById('battery');
+          batteryElement.textContent = 'Battery: ' + voltage + 'V';
+          
+          const v = parseFloat(voltage);
+          if (v < 3.3) {
+            batteryElement.className = 'low';
+          } else if (v < 3.7) {
+            batteryElement.className = 'medium';
+          } else {
+            batteryElement.className = 'good';
+          }
+        })
+        .catch(error => {
+          console.error('Failed to update battery:', error);
+        });
+    }
+    
+    function updateSensors() {
+      fetch('/sensors')
+        .then(response => response.json())
+        .then(data => {
+          const irFront = document.getElementById('irFront');
+          const irBack = document.getElementById('irBack');
+          const ultra = document.getElementById('ultra');
+          
+          irFront.textContent = data.irFront ? 'BLACK' : 'WHITE';
+          irFront.className = data.irFront ? 'ir-black' : 'ir-white';
+          
+          irBack.textContent = data.irBack ? 'BLACK' : 'WHITE';
+          irBack.className = data.irBack ? 'ir-black' : 'ir-white';
+          
+          if (data.distance === -1) {
+            ultra.textContent = 'OUT OF RANGE';
+            ultra.className = 'ultra-warning';
+          } else {
+            ultra.textContent = data.distance;
+            ultra.className = data.distance < 30 ? 'ultra-danger' : 'ultra-highlight';
+          }
+        })
+        .catch(error => {
+          console.error('Failed to update sensors:', error);
+        });
+    }
+    
+    document.addEventListener('keydown', function(event) {
+      if (event.repeat) return;
+      
+      switch(event.key.toLowerCase()) {
+        case 'w':
+          controlStart('forward');
+          break;
+        case 's':
+          controlStart('backward');
+          break;
+        case 'a':
+          controlStart('left');
+          break;
+        case 'd':
+          controlStart('right');
+          break;
+        case ' ':
+          controlStart('stop');
+          break;
+      }
+    });
+    
+    document.addEventListener('keyup', function(event) {
+      switch(event.key.toLowerCase()) {
+        case 'w':
+        case 's':
+        case 'a':
+        case 'd':
+          controlStop();
+          break;
+      }
+    });
+    
+    window.onload = () => {
+      initWebSocket();
+      updateStatus();
+      updateBattery();
+      updateSensors();
+      
+      setInterval(updateSensors, 1000);  // Update every second
+      setInterval(updateStatus, 3000);   // Check connection every 3 seconds
+      setInterval(updateBattery, 5000);  // Check battery every 5 seconds
+    };
+  </script>
+</body>
+</html>)rawliteral";
+  server.send(200, "text/html", html);
+}
+
+void setup() {
+  Serial.begin(115200);
+  setupMotors();
+  setupSensors();
+
+  // Configure Access Point with static IP
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  
+  // Add connection feedback
+  Serial.println("Setting up Access Point...");
+  if(WiFi.softAP(ssid, password)) {
+    Serial.println("Access Point Created Successfully");
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
+  } else {
+    Serial.println("Access Point Creation Failed!");
+  }
+  
+  // Initialize DNS server
+  dnsServer.start(DNS_PORT, "*", apIP);
+  
+  // Web server routes
+  server.on("/", handleRoot);
+  server.on("/togglePower", []() {
+    powerOn = !powerOn;
+    if (!powerOn) stopMotors();
+    server.send(200, "text/plain", powerOn ? "ON" : "OFF");
+  });
+  server.on("/toggleMode", []() {
+    autoMode = !autoMode;
+    if (!autoMode) stopMotors();
+    server.send(200, "text/plain", autoMode ? "Auto" : "Manual");
+  });
+  server.on("/speed", []() {
+    if (server.hasArg("value")) {
+      motorSpeed = server.arg("value").toInt();
+      server.send(200, "text/plain", "Speed updated");
+    } else {
+      server.send(400, "text/plain", "No speed value received");
+    }
+  });
+  
+  server.begin();
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+  webSocket.loop();
+  
+  if (powerOn && autoMode) {
+    runAutoMode();
+  }
+}
